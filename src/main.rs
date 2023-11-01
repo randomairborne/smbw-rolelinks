@@ -1,27 +1,53 @@
+mod model;
 mod util;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use crate::util::{validate_discord_sig, wait_for_shutdown};
-use axum::response::{IntoResponse, Response};
-use axum::{body::Bytes, extract::State, http::HeaderMap, Json, Router};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use reqwest::Client as HttpClient;
-use tokio::signal::unix::{signal, SignalKind};
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::HeaderMap,
+    response::{IntoResponse, Response},
+    Json, Router,
+};
+use ed25519_dalek::VerifyingKey;
+use reqwest::{redirect::Policy, Client as HttpClient};
 use twilight_http::{client::InteractionClient, Client as DiscordClient};
 use twilight_model::{
-    application::interaction::{Interaction, InteractionType},
+    application::interaction::{
+        application_command::CommandOptionValue, Interaction, InteractionData, InteractionType,
+    },
     channel::message::MessageFlags,
     http::interaction::{InteractionResponse, InteractionResponseType},
-    id::{marker::ApplicationMarker, Id},
+    id::{
+        marker::{ApplicationMarker, GuildMarker, RoleMarker},
+        Id,
+    },
+    user::User,
 };
-use twilight_util::builder::embed::EmbedBuilder;
-use twilight_util::builder::InteractionResponseDataBuilder;
+use twilight_util::builder::{embed::EmbedBuilder, InteractionResponseDataBuilder};
+
+use crate::{
+    model::{Bests, RunStatus},
+    util::{validate_discord_sig, wait_for_shutdown},
+};
 
 #[tokio::main]
 async fn main() {
+    dotenvy::dotenv().ok();
+
     let pub_key_string = std::env::var("DISCORD_PUBKEY").expect("Expected DISCORD_PUBKEY");
     let token = std::env::var("DISCORD_TOKEN").expect("Expected DISCORD_TOKEN");
+    let game_id = std::env::var("GAME_ID").expect("Expected GAME_ID");
+    let guild_id: Id<GuildMarker> = std::env::var("GUILD_ID")
+        .expect("Expected GUILD_ID")
+        .parse()
+        .expect("ROLE_ID was not a snowflake!");
+    let role_id: Id<RoleMarker> = std::env::var("ROLE_ID")
+        .expect("Expected ROLE_ID")
+        .parse()
+        .expect("ROLE_ID was not a snowflake!");
+
     let pub_key_bytes: [u8; 32] = hex::decode(pub_key_string)
         .expect("Discord pubkey was invalid hex")
         .try_into()
@@ -39,6 +65,7 @@ async fn main() {
         .id;
     let http = reqwest::Client::builder()
         .user_agent("smbwdiscord/rolelinker (valk@randomairborne.dev)")
+        .redirect(Policy::limited(5))
         .build()
         .unwrap();
 
@@ -47,7 +74,15 @@ async fn main() {
         http,
         pubkey: Arc::new(pubkey),
         my_id,
+        game_id: game_id.into(),
+        guild_id,
+        role_id,
     };
+    state
+        .interaction()
+        .set_global_commands(model::commands().as_slice())
+        .await
+        .unwrap();
     let app = Router::new()
         .route("/interaction-callback", axum::routing::any(handle))
         .with_state(state);
@@ -81,6 +116,9 @@ pub struct AppState {
     http: HttpClient,
     pubkey: Arc<VerifyingKey>,
     my_id: Id<ApplicationMarker>,
+    game_id: Arc<str>,
+    role_id: Id<RoleMarker>,
+    guild_id: Id<GuildMarker>,
 }
 
 impl AppState {
@@ -123,21 +161,96 @@ impl AppState {
     }
 
     async fn process(&self, interaction: Interaction) -> Result<(), Error> {
-        // todo: this is where to pick up tomorrow
+        let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
+            return Err(Error::WrongInteractionData);
+        };
+        let user = Self::interaction_get_user(&interaction).ok_or(Error::MissingUser)?;
+        let resp_text = match data.name.as_str() {
+            "link" => {
+                let args: HashMap<String, CommandOptionValue> = data
+                    .options
+                    .iter()
+                    .cloned()
+                    .map(|v| (v.name, v.value))
+                    .collect();
+                let Some(CommandOptionValue::String(src_name)) = args.get("src_name") else {
+                    return Err(Error::WrongSrcName);
+                };
+                self.link(user, src_name).await?
+            }
+            "unlink" => self.unlink(user).await?,
+            name => return Err(Error::UnknownCommand(name.to_owned())),
+        };
+        let embed = EmbedBuilder::new().description(resp_text).build();
+        self.interaction()
+            .create_followup(&interaction.token)
+            .embeds(&[embed])?
+            .await?;
         Ok(())
     }
 
-    async fn eligible(&self, src: &str, discord: &str) -> Result<bool, Error> {
-        let body = self
+    async fn link(&self, user: &User, src_name: &str) -> Result<String, Error> {
+        let msg = match self.eligible(&user.name, src_name).await? {
+            Eligibility::Eligible => {
+                self.discord
+                    .add_guild_member_role(self.guild_id, user.id, self.role_id)
+                    .await?;
+                format!("granted role <@&{}>", self.role_id)
+            }
+            Eligibility::NotLinked => format!("speedrun.com user [{src_name}](https://www.speedrun.com/users/{src_name}) is not connected to discord user <@{0}>", user.id),
+            Eligibility::LinkedWithNoVerifiedRuns => format!("You have linked your speedrun.com account [{src_name}](https://www.speedrun.com/users/{src_name}), but it does not have any verified runs for SMBW!")
+        };
+        Ok(msg)
+    }
+
+    async fn unlink(&self, user: &User) -> Result<String, Error> {
+        self.discord
+            .remove_guild_member_role(self.guild_id, user.id, self.role_id)
+            .await?;
+        Ok(format!("removed role <@&{}>", self.role_id))
+    }
+
+    fn interaction_get_user(interaction: &Interaction) -> Option<&User> {
+        if let Some(member) = &interaction.member {
+            if let Some(user) = &member.user {
+                return Some(user);
+            }
+        }
+        if let Some(user) = &interaction.user {
+            return Some(user);
+        }
+        None
+    }
+
+    async fn eligible(&self, discord_name: &str, src_name: &str) -> Result<Eligibility, Error> {
+        let src_url = format!("https://www.speedrun.com/user/{src_name}");
+        let page = self.http.get(src_url).send().await?.text().await?;
+        if !page.contains(&format!("@{discord_name}")) {
+            return Ok(Eligibility::NotLinked);
+        }
+        let pbs_url = format!("https://www.speedrun.com/api/v1/users/{src_name}/personal-bests");
+        let bests: Bests = self
             .http
-            .get(format!("https://www.speedrun.com/users/{src}"))
+            .get(pbs_url)
+            .header("Accept", "application/json")
             .send()
             .await?
-            .text()
+            .json()
             .await?;
-        // todo: validate that this used also has verified run
-        Ok(body.contains(discord))
+        for run_data in bests.data {
+            let run = run_data.run;
+            if run.status.status == RunStatus::Verified && run.game == self.game_id.as_ref() {
+                return Ok(Eligibility::Eligible);
+            }
+        }
+        Ok(Eligibility::LinkedWithNoVerifiedRuns)
     }
+}
+
+pub enum Eligibility {
+    NotLinked,
+    LinkedWithNoVerifiedRuns,
+    Eligible,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -156,10 +269,18 @@ pub enum Error {
     TwilightValidateEmbed(#[from] twilight_validate::embed::EmbedValidationError),
     #[error("twilight-validate message error: {0}")]
     TwilightValidateMessage(#[from] twilight_validate::message::MessageValidationError),
+    #[error("Unknown command: {0}")]
+    UnknownCommand(String),
     #[error("Missing X-Signature-Ed25519 header")]
     MissingSignatureHeader,
     #[error("Missing X-Signature-Timestamp header")]
     MissingTimestampHeader,
+    #[error("Missing user from discord")]
+    MissingUser,
+    #[error("Wrong interaction data from discord")]
+    WrongInteractionData,
+    #[error("Discord sent `src_name` that was not a string, or didn't send it at all!")]
+    WrongSrcName,
 }
 
 impl IntoResponse for Error {

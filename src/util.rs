@@ -1,7 +1,8 @@
-use crate::{AppState, Error};
 use axum::http::HeaderMap;
 use ed25519_dalek::{Signature, Verifier};
 use tokio::signal::unix::{signal, SignalKind};
+
+use crate::{AppState, Error};
 
 pub async fn wait_for_shutdown() {
     let mut int = signal(SignalKind::interrupt()).unwrap();
