@@ -12,4 +12,4 @@ COPY --from=builder /build/target/release/smbw-rolelinks /usr/bin/smbw-rolelinks
 
 EXPOSE 8080
 
-CMD [ "/usr/bin/smbw-rolelinks" ]
+ENTRYPOINT /usr/bin/smbw-rolelinks
