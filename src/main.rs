@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 use axum::{
     body::Bytes,
     extract::State,
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json, Router,
 };
@@ -152,7 +152,10 @@ impl AppState {
     async fn report_err(&self, token: &str, error: &Error) -> Result<(), Error> {
         let client = self.interaction();
         let err_embed = EmbedBuilder::new().description(error.to_string()).build();
-        client.create_followup(token).embeds(&[err_embed])?.await?;
+        client
+            .update_response(token)
+            .embeds(Some(&[err_embed]))?
+            .await?;
         Ok(())
     }
 
@@ -183,8 +186,8 @@ impl AppState {
         };
         let embed = EmbedBuilder::new().description(resp_text).build();
         self.interaction()
-            .create_followup(&interaction.token)
-            .embeds(&[embed])?
+            .update_response(&interaction.token)
+            .embeds(Some(&[embed]))?
             .await?;
         Ok(())
     }
@@ -285,6 +288,21 @@ pub enum Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        self.to_string().into_response()
+        let status = match self {
+            Error::Dalek(_) => StatusCode::UNAUTHORIZED,
+            Error::Hex(_) => StatusCode::UNAUTHORIZED,
+            Error::SerdeJson(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::Reqwest(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::TwilightHttp(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::TwilightValidateEmbed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::TwilightValidateMessage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::UnknownCommand(_) => StatusCode::BAD_REQUEST,
+            Error::MissingSignatureHeader => StatusCode::UNAUTHORIZED,
+            Error::MissingTimestampHeader => StatusCode::UNAUTHORIZED,
+            Error::MissingUser => StatusCode::BAD_REQUEST,
+            Error::WrongInteractionData => StatusCode::BAD_REQUEST,
+            Error::WrongSrcName => StatusCode::BAD_REQUEST,
+        };
+        (status, self.to_string()).into_response()
     }
 }
