@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
-tokio = { version = "1.33", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1.34", features = ["rt-multi-thread", "macros", "signal"] }
 twilight-util = { version = "0.15", features = ["builder"] }
 serde = { version = "1.0.190", features = ["derive"] }
 twilight-validate = "0.15"
