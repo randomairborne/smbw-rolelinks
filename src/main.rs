@@ -1,7 +1,7 @@
 mod model;
 mod util;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
 use axum::{
     body::Bytes,
@@ -12,6 +12,7 @@ use axum::{
 };
 use ed25519_dalek::VerifyingKey;
 use reqwest::{redirect::Policy, Client as HttpClient};
+use tokio::net::TcpListener;
 use twilight_http::{client::InteractionClient, Client as DiscordClient};
 use twilight_model::{
     application::interaction::{
@@ -29,7 +30,7 @@ use twilight_util::builder::{embed::EmbedBuilder, InteractionResponseDataBuilder
 
 use crate::{
     model::{Bests, RunStatus},
-    util::{validate_discord_sig, wait_for_shutdown},
+    util::validate_discord_sig,
 };
 
 #[tokio::main]
@@ -86,11 +87,10 @@ async fn main() {
     let app = Router::new()
         .route("/interaction-callback", axum::routing::any(handle))
         .with_state(state);
-    axum::Server::bind(&([0, 0, 0, 0], 8080).into())
-        .serve(app.into_make_service())
-        .with_graceful_shutdown(wait_for_shutdown())
+    let tcp = TcpListener::bind((IpAddr::from([0, 0, 0, 0]), 8080))
         .await
-        .unwrap()
+        .expect("Failed to start TCP listener on");
+    axum::serve(tcp, app).await.unwrap()
 }
 
 pub async fn handle(
