@@ -90,7 +90,10 @@ async fn main() {
     let tcp = TcpListener::bind((IpAddr::from([0, 0, 0, 0]), 8080))
         .await
         .expect("Failed to start TCP listener on");
-    axum::serve(tcp, app).await.unwrap()
+    axum::serve(tcp, app)
+        .with_graceful_shutdown(vss::shutdown_signal())
+        .await
+        .unwrap()
 }
 
 pub async fn handle(
@@ -154,7 +157,7 @@ impl AppState {
         let err_embed = EmbedBuilder::new().description(error.to_string()).build();
         client
             .update_response(token)
-            .embeds(Some(&[err_embed]))?
+            .embeds(Some(&[err_embed]))
             .await?;
         Ok(())
     }
@@ -187,7 +190,7 @@ impl AppState {
         let embed = EmbedBuilder::new().description(resp_text).build();
         self.interaction()
             .update_response(&interaction.token)
-            .embeds(Some(&[embed]))?
+            .embeds(Some(&[embed]))
             .await?;
         Ok(())
     }
@@ -268,10 +271,6 @@ pub enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("twilight-http error: {0}")]
     TwilightHttp(#[from] twilight_http::Error),
-    #[error("twilight-validate embed error: {0}")]
-    TwilightValidateEmbed(#[from] twilight_validate::embed::EmbedValidationError),
-    #[error("twilight-validate message error: {0}")]
-    TwilightValidateMessage(#[from] twilight_validate::message::MessageValidationError),
     #[error("Unknown command: {0}")]
     UnknownCommand(String),
     #[error("Missing X-Signature-Ed25519 header")]
@@ -294,8 +293,6 @@ impl IntoResponse for Error {
             Error::SerdeJson(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Reqwest(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::TwilightHttp(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Error::TwilightValidateEmbed(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Error::TwilightValidateMessage(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::UnknownCommand(_) => StatusCode::BAD_REQUEST,
             Error::MissingSignatureHeader => StatusCode::UNAUTHORIZED,
             Error::MissingTimestampHeader => StatusCode::UNAUTHORIZED,
