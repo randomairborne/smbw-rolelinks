@@ -11,7 +11,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 twilight-util = { version = "0.16.0-rc.1", features = ["builder"] }
 serde = { version = "1", features = ["derive"] }
 twilight-model = "0.16.0-rc.1"
-twilight-http = "0.16.0-rc.1"
+twilight-http = "0.16.0"
 ed25519-dalek = "2"
 serde_json = "1"
 dotenvy = "0.15"
