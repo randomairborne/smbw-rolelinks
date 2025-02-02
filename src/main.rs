@@ -35,8 +35,6 @@ use crate::{
 
 #[tokio::main]
 async fn main() {
-    dotenvy::dotenv().ok();
-
     let pub_key_string = std::env::var("DISCORD_PUBKEY").expect("Expected DISCORD_PUBKEY");
     let token = std::env::var("DISCORD_TOKEN").expect("Expected DISCORD_TOKEN");
     let game_id = std::env::var("GAME_ID").expect("Expected GAME_ID");
